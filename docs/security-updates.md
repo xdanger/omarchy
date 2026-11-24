@@ -19,15 +19,16 @@ It is a text file. The first line marks the format and must be exactly as shown;
 # The oldest version of each package without a known serious security issue.
 # Rule: a minimum must never be higher than the version the stable channel
 # can install, on x86_64 and aarch64. Check stable-mirror.omarchy.org and
-# pkgs.omarchy.org/stable before raising one. A minimum stable cannot reach
-# shows nobody anything until it can, so it hides the issue rather than
-# raising it.
+# pkgs.omarchy.org/stable before adding or raising one. A minimum is always
+# the release that fixed the issue: while stable has no such release, leave
+# the package off the list (or at its previous minimum) rather than listing
+# a lower version that is still vulnerable.
 google-chrome 157.0.8103.50
 ```
 
 The list is kept by hand for now: edit the file, check the rule, and upload it to the bucket behind `pkgs.omarchy.org`, from where the China replica copies it.
 
-**The rule for whoever edits it:** a minimum must never be higher than the version the stable channel can install. Stable is the slowest channel, so a minimum it can reach is reachable everywhere a package is published at all. Chromium is the example: while stable's snapshot carries 155, its minimum stays at or below 155, even though the fix is in 157; it goes up when stable gets a release that has the fix. Check both architectures, since aarch64 stable is a different snapshot.
+**The rule for whoever edits it:** a minimum must never be higher than the version the stable channel can install. Stable is the slowest channel, so a minimum it can reach is reachable everywhere a package is published at all. A minimum is also always the release that fixed the issue, never a stand-in: a lower version that is still vulnerable would present an upgrade to it as a security fix. So when stable cannot install the fix yet, the package waits. Chromium is the example: the fix is in 157 while stable's snapshot carries 155, so Chromium stays off the list (or at its previous minimum) and goes in at 157.0.8103.50 once stable can install it. Check both architectures, since aarch64 stable is a different snapshot.
 
 ## What the client does
 

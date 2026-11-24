@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# omarchy:summary=Find installable updates that fix known security issues
+# omarchy:subcommand=scan — read checkupdates lines on stdin and print the security updates among them
+# omarchy:subcommand=list — print the security updates found by the last scan that are still pending
+# omarchy:subcommand=snooze — stop highlighting the current security updates for a few days
+# omarchy:hidden=true
+
+# Omarchy publishes a list of minimum versions: the oldest release of each
+# package without a known serious security issue (docs/security-updates.md).
+# A package counts only when it is installed below its minimum AND the update
+# pacman would install reaches it, so a reminder is always one `omarchy update`
+# away from going away. A channel or architecture that has no such release yet
+# shows nothing.
+
+set -euo pipefail
+
+state_dir="$HOME/.local/state/omarchy/security-updates"
+minimums="$state_dir/minimum-versions"
+next_fetch="$state_dir/next-fetch"
+findings="$state_dir/findings"
+notified="$state_dir/notified"
+snoozed="$state_dir/snoozed"
+snooze_seconds=$(( 3 * 86400 ))
+
+# The list is fetched from the origins of the [omarchy] repository's servers,
+# in pacman.conf order, so a region profile that puts pkgs.omarchy.cn first
+# fetches it from there and falls back to pkgs.omarchy.org like pacman does.
+list_urls() {
+  local server origin
+  declare -A seen=()
+  while read -r server; do
+    [[ $server =~ ^(https?://[^/]+) ]] || continue
+    origin=${BASH_REMATCH[1]}
+    [[ -z ${seen[$origin]:-} ]] || continue
+    seen[$origin]=1
+    echo "$origin/security/minimum-versions"
+  done < <(pacman-conf --repo omarchy Server 2>/dev/null || true)
+}
+
+# A captive portal or a CDN error page answers 200 too, so only a file that
+# says what it is, with nothing but package and version pairs, replaces the list.
+valid_list() {
+  local line
+  { IFS= read -r line && [[ $line == "# omarchy-security-minimums 1" ]]; } <"$1" || return 1
+  while IFS= read -r line; do
+    [[ -z $line || $line == \#* || $line =~ ^[a-z0-9@._+-]+[[:space:]]+[0-9A-Za-z:._+~-]+[[:space:]]*$ ]] || return 1
+  done <"$1"
+}
+
+# Once a day at a random time: the next fetch is due at a random second of
+# tomorrow. The shell checks for updates every six hours and when the network
+# comes up, so the fetch happens at the first check after that. A failed fetch
+# keeps the last list and is tried again at the next check, without a word.
+refresh_list() {
+  local now due url tmp
+  now=$(date +%s)
+  due=$(cat "$next_fetch" 2>/dev/null || echo 0)
+  [[ $due =~ ^[0-9]+$ ]] || due=0
+  (( now >= due )) || return 0
+
+  tmp=$(mktemp "$state_dir/.minimum-versions.XXXXXX")
+  while read -r url; do
+    if curl -fsSL --max-time 20 --max-filesize 65536 -o "$tmp" "$url" 2>/dev/null && valid_list "$tmp"; then
+      mv -f "$tmp" "$minimums"
+      echo $(( $(date -d 'tomorrow 00:00' +%s) + ((RANDOM << 15) | RANDOM) % 86400 )) >"$next_fetch"
+      return 0
+    fi
+  done < <(list_urls)
+  rm -f "$tmp"
+}
+
+# Findings still pending: installed below the minimum. An update that already
+# went through, by omarchy update or by hand, drops out here without a rescan.
+pending_findings() {
+  local name old new minimum installed
+  [[ -f $findings ]] || return 0
+  while read -r name old new minimum; do
+    installed=$(pacman -Q "$name" 2>/dev/null | awk '{ print $2 }') || true
+    [[ -n $installed ]] || continue
+    (( $(vercmp "$installed" "$minimum") < 0 )) || continue
+    echo "$name $installed $new $minimum"
+  done <"$findings"
+}
+
+is_snoozed() {
+  local now=$1 key=$2 name minimum until
+  [[ -f $snoozed ]] || return 1
+  while read -r name minimum until; do
+    [[ "$name $minimum" == "$key" && $until =~ ^[0-9]+$ ]] && (( until > now )) && return 0
+  done <"$snoozed"
+  return 1
+}
+
+notify() {
+  local names
+  names=$(printf '%s\n' "$@" | paste -sd, | sed 's/,/, /g')
+  omarchy-notification-send -u normal -g 󰒃 \
+    "$(omarchy-i18n update.security.notifyTitle)" \
+    "$(omarchy-i18n update.security.notifyBody "$names")" \
+    --exec omarchy-launch-floating-terminal-with-presentation omarchy-update >/dev/null 2>&1 || true
+}
+
+scan() {
+  local name old arrow new rest minimum now
+  local -a found=() fresh=()
+  declare -A minimum_of=()
+
+  refresh_list
+
+  if [[ -f $minimums ]]; then
+    while read -r name minimum _; do
+      [[ -z $name || $name == \#* ]] || minimum_of[$name]=$minimum
+    done <"$minimums"
+  fi
+
+  # checkupdates lines: "name old -> new", with " [ignored]" after a package
+  # pacman holds back, which omarchy update would not upgrade either.
+  while read -r name old arrow new rest; do
+    [[ $arrow == "->" && -z $rest ]] || continue
+    minimum=${minimum_of[$name]:-}
+    [[ -n $minimum ]] || continue
+    (( $(vercmp "$old" "$minimum") < 0 )) || continue
+    (( $(vercmp "$new" "$minimum") >= 0 )) || continue
+    found+=("$name $old $new $minimum")
+  done
+
+  printf '%s\n' "${found[@]}" | sed '/^$/d' >"$findings"
+
+  now=$(date +%s)
+  for line in "${found[@]}"; do
+    read -r name old new minimum <<<"$line"
+    is_snoozed "$now" "$name $minimum" || echo "security $name $old -> $new"
+    # One notification per package and minimum, ever: a new minimum is a new
+    # issue worth hearing about, a check after being offline is not.
+    if ! grep -qxF "$name $minimum" "$notified" 2>/dev/null; then
+      echo "$name $minimum" >>"$notified"
+      fresh+=("$name")
+    fi
+  done
+
+  (( ${#fresh[@]} == 0 )) || notify "${fresh[@]}"
+}
+
+snooze() {
+  local name old new minimum until
+  until=$(( $(date +%s) + snooze_seconds ))
+  pending_findings | while read -r name old new minimum; do
+    echo "$name $minimum $until"
+  done >"$snoozed"
+  omarchy-shell -q omarchy.system-update refresh >/dev/null 2>&1 || true
+}
+
+mkdir -p "$state_dir"
+
+case "${1:-}" in
+  scan)
+    # The bar checks once per monitor, so checks can overlap: one at a time
+    # keeps a single fetch and a single notification.
+    exec {lock}>"$state_dir/.lock"
+    flock "$lock"
+    scan
+    ;;
+  list)
+    pending_findings | awk '{ print $1, $2, $3 }'
+    ;;
+  snooze)
+    snooze
+    ;;
+  *)
+    echo "Usage: omarchy-update-security <scan|list|snooze>" >&2
+    exit 1
+    ;;
+esac

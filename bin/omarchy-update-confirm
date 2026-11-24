@@ -2,17 +2,43 @@
 
 # omarchy:summary=Prompt for confirmation before starting an update
 
+lines=(
+  "$(omarchy-i18n update.ready)"
+  ""
+  "• $(omarchy-i18n update.cannotStop)"
+  "• $(omarchy-i18n update.connectPower)"
+)
+
+# Updates that fix known security issues, as the bar's reminder found them.
+mapfile -t security < <(omarchy-update-security list 2>/dev/null)
+if (( ${#security[@]} > 0 )); then
+  lines+=("" "$(omarchy-i18n update.security.title)")
+  width=0
+  for finding in "${security[@]}"; do
+    name=${finding%% *}
+    (( ${#name} > width )) && width=${#name}
+  done
+  for finding in "${security[@]}"; do
+    read -r name installed available <<<"$finding"
+    printf -v row '  %-*s  %s → %s' "$width" "$name" "$installed" "$available"
+    lines+=("$row")
+  done
+  lines+=("$(omarchy-i18n update.security.reason)")
+fi
+
 gum style --border normal --padding "1 2" \
-  "$(omarchy-i18n update.ready)" \
-  "" \
-  "• $(omarchy-i18n update.cannotStop)" \
-  "• $(omarchy-i18n update.connectPower)" \
+  "${lines[@]}" \
   "" \
   "$(omarchy-i18n update.whatsNew "https://github.com/omacom/omarchy/releases/latest")"
 
 echo
 
 if ! gum confirm --affirmative "$(omarchy-i18n common.yes)" --negative "$(omarchy-i18n common.no)" "$(omarchy-i18n update.continue)"; then
-  echo "$(omarchy-i18n update.cancelled)"
+  if (( ${#security[@]} > 0 )); then
+    omarchy-update-security snooze
+    echo "$(omarchy-i18n update.security.later)"
+  else
+    echo "$(omarchy-i18n update.cancelled)"
+  fi
   exit 1
 fi

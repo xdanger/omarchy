@@ -27,14 +27,32 @@ elif pacman -Qq omarchy >/dev/null 2>&1; then
   package=omarchy
 fi
 
+# checkupdates exits 0 with updates, 2 with none, and 1 when it could not
+# check, offline say.
+pending=()
+pending_status=0
+pending_output=$(checkupdates --nocolor 2>/dev/null) || pending_status=$?
+[[ -z $pending_output ]] || mapfile -t pending <<<"$pending_output"
+
 # Until the first omarchy update, any package counts: a machine installed from
 # older media needs one even when Omarchy's own package is current.
 if ! omarchy-done check first-update; then
-  mapfile -t pending < <(checkupdates --nocolor 2>/dev/null || true)
   updates+=("${pending[@]}")
 elif [[ -n $package ]]; then
-  update=$(checkupdates --nocolor 2>/dev/null | awk -v package="$package" '$1 == package { print; exit }' || true)
-  [[ -z $update ]] || updates+=("$update")
+  for line in "${pending[@]}"; do
+    if [[ ${line%% *} == "$package" ]]; then
+      updates+=("$line")
+      break
+    fi
+  done
+fi
+
+# After that, other packages count only when their update fixes a known
+# security issue. A check that could not reach the repositories leaves the
+# last findings alone instead of reading as none.
+if (( pending_status == 0 || pending_status == 2 )); then
+  mapfile -t security < <(printf '%s\n' "${pending[@]}" | omarchy-update-security scan 2>/dev/null || true)
+  updates+=("${security[@]}")
 fi
 
 if (( ${#updates[@]} > 0 )); then

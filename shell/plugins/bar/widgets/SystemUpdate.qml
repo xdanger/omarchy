@@ -10,6 +10,10 @@ BarWidget {
   moduleName: "omarchy.system-update"
 
   property bool updateAvailable: false
+  // Packages whose pending update fixes a known security issue, from the
+  // "security <name> <old> -> <new>" lines omarchy-update-available prints.
+  property var securityPackages: []
+  readonly property bool securityUpdate: securityPackages.length > 0
   // A refresh asked for while a check is running (say, the network coming back
   // during a check that started offline) runs once that check exits.
   property bool refreshPending: false
@@ -19,7 +23,16 @@ BarWidget {
     else updateProc.running = true
   }
 
-  function clear() { updateAvailable = false }
+  function clear() {
+    updateAvailable = false
+    securityPackages = []
+  }
+
+  function readUpdates(output) {
+    securityPackages = String(output || "").split("\n")
+      .filter(function(line) { return line.indexOf("security ") === 0 })
+      .map(function(line) { return line.split(" ")[1] })
+  }
 
   function runUpdate() {
     if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation omarchy-update")
@@ -44,6 +57,10 @@ BarWidget {
   Process {
     id: updateProc
     command: ["omarchy-update-available"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.readUpdates(text)
+    }
     onExited: function(exitCode) {
       root.updateAvailable = exitCode === 0
       if (root.refreshPending) {
@@ -70,9 +87,12 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "\uf021"
+    text: root.securityUpdate ? "\uf12a" : "\uf021"
+    active: root.securityUpdate
     slotSize: Style.bar.statusSlot
-    tooltipText: I18n.t("bar.pendingUpdates")
+    tooltipText: root.securityUpdate
+      ? I18n.t("bar.securityUpdate").arg(root.securityPackages.join(", "))
+      : I18n.t("bar.pendingUpdates")
     onPressed: root.runUpdate()
   }
 }
